@@ -17,6 +17,7 @@ ai_service = AIService()
 async def query_ai(request: AIQueryRequest):
     """
     Ask AI a question about user's contacts and notes
+    Maintains conversation memory for natural dialogue
     
     Example request:
     {
@@ -85,6 +86,23 @@ async def test_ollama():
         raise HTTPException(
             status_code=503,
             detail=f"Error testing Ollama: {str(e)}"
+        )
+
+@router.post("/clear-memory/{user_id}")
+async def clear_user_memory(user_id: str):
+    """
+    Clear conversation memory for a user (start fresh conversation)
+    """
+    try:
+        if user_id in ai_service.user_memories:
+            del ai_service.user_memories[user_id]
+            return {"message": f"Conversation memory cleared for user {user_id}"}
+        else:
+            return {"message": f"No conversation memory found for user {user_id}"}
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error clearing memory: {str(e)}"
         )
 
 @router.get("/user-data/{user_id}")

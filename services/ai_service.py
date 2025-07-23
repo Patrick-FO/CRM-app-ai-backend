@@ -1,35 +1,24 @@
 import os
 from langchain_community.llms import Ollama
 from langchain.prompts import PromptTemplate
+from langchain.memory import ConversationBufferWindowMemory
+from langchain.chains import ConversationChain
 from config.database import get_db_connection
 from psycopg2.extras import RealDictCursor
 import json
+from datetime import datetime
 
 class AIService:
     def __init__(self):
         # Initialize Ollama
         self.llm = Ollama(
             model=os.getenv("OLLAMA_MODEL", "llama3.2"),
-            base_url=os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
+            base_url=os.getenv("OLLAMA_BASE_URL", "http://localhost:11434"),
+            temperature=0.7  # Make responses more conversational
         )
         
-        # Create prompt template
-        self.prompt_template = PromptTemplate(
-            input_variables=["contacts", "notes", "query"],
-            template="""
-You are an AI assistant for a CRM system. Answer questions based ONLY on the user's contacts and notes below.
-
-CONTACTS:
-{contacts}
-
-NOTES:
-{notes}
-
-Question: {query}
-
-Please provide a helpful answer based only on the information above. If you cannot answer with the given data, say so.
-"""
-        )
+        # Store conversation memories for each user - using simple string storage
+        self.user_conversations = {}
     
     def get_user_data(self, user_id: str):
         """Get all contacts and notes for a specific user (user_id is UUID string)"""
@@ -88,7 +77,7 @@ Please provide a helpful answer based only on the information above. If you cann
             conn.close()
     
     def ask_question(self, user_id: str, question: str):
-        """Ask AI a question about user's contacts and notes"""
+        """Ask AI a question about user's contacts and notes with simple conversation memory"""
         try:
             # Get user's data
             contacts, notes = self.get_user_data(user_id)
@@ -115,22 +104,60 @@ Please provide a helpful answer based only on the information above. If you cann
                     note_info += f" (Related to: {', '.join(note['related_contacts'])})"
                 notes_formatted.append(note_info)
             
-            # Create the prompt
+            # Create context about user's data
             contacts_text = '\n'.join(contacts_formatted) if contacts_formatted else "No contacts found."
             notes_text = '\n'.join(notes_formatted) if notes_formatted else "No notes found."
             
-            prompt = self.prompt_template.format(
-                contacts=contacts_text,
-                notes=notes_text, 
-                query=question
-            )
+            # Get conversation history for this user (simple approach)
+            if user_id not in self.user_conversations:
+                self.user_conversations[user_id] = []
+            
+            conversation_history = self.user_conversations[user_id]
+            
+            # Format conversation history
+            history_text = ""
+            if conversation_history:
+                history_items = []
+                for item in conversation_history[-6:]:  # Last 6 exchanges (3 back-and-forth)
+                    history_items.append(f"Human: {item['question']}")
+                    history_items.append(f"AI: {item['answer']}")
+                history_text = "\n".join(history_items)
+            
+            # Create the full prompt
+            full_prompt = f"""You are a helpful AI assistant for a CRM system. You're having a conversation with a user about their business contacts and notes.
+
+Context about the user's data:
+CONTACTS:
+{contacts_text}
+
+NOTES:
+{notes_text}
+
+Instructions: Answer naturally and conversationally. Don't start with phrases like "Based on your data" or "According to your notes". 
+Act like you're a helpful assistant who knows this information about the user. Be direct and answer concisely. Don't make out-of-place suggestions, just answer whatever the user is asking and move on.
+If you don't have relevant information, just say you don't see that information rather than being overly formal. 
+Also, you are not able to create notes or contacts for a user, so if they ask you to actually do something for them which requires any other CRUD operation than reading, tell them you can't. 
+
+{f"Previous conversation:\n{history_text}\n" if history_text else ""}Human: {question}
+AI: """
             
             # Get AI response
-            response = self.llm.invoke(prompt)
+            response = self.llm.invoke(full_prompt)
+            
+            # Store this exchange in conversation history
+            self.user_conversations[user_id].append({
+                "question": question,
+                "answer": response.strip(),
+                "timestamp": datetime.now().isoformat()
+            })
+            
+            # Keep only last 10 exchanges to prevent memory from growing too large
+            if len(self.user_conversations[user_id]) > 10:
+                self.user_conversations[user_id] = self.user_conversations[user_id][-10:]
             
             return {
                 "success": True,
-                "response": response,
+                "response": response.strip(),
                 "data_summary": {
                     "contacts_count": len(contacts),
                     "notes_count": len(notes)
@@ -150,3 +177,10 @@ Please provide a helpful answer based only on the information above. If you cann
             return True, response
         except Exception as e:
             return False, str(e)
+    
+    def clear_user_memory(self, user_id: str):
+        """Clear conversation memory for a specific user"""
+        if user_id in self.user_conversations:
+            del self.user_conversations[user_id]
+            return True
+        return False
