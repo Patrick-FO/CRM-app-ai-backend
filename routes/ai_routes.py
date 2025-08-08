@@ -3,6 +3,7 @@ from fastapi.responses import StreamingResponse
 from models.schemas import AIQueryRequest, AIQueryResponse
 from services.ai_service import AIService
 from sse_starlette.sse import EventSourceResponse
+from datetime import datetime
 import logging
 import json
 import asyncio
@@ -127,23 +128,57 @@ async def query_ai_stream(request: AIQueryRequest):
                 "data": json.dumps({"status": "thinking", "message": "AI is processing your question..."})
             }
             
-            # Get streaming AI response
+            # Build the prompt (same logic as before)
+            full_prompt = ai_service.build_prompt(request.user_id, request.query, contacts, notes)
+            
+            # Real streaming AI response
             try:
-                # Use the streaming version of ask_question
-                async for chunk in ai_service.ask_question_stream(request.user_id, request.query):
-                    if chunk["type"] == "token":
-                        yield {
-                            "event": "token",
-                            "data": json.dumps({"token": chunk["content"]})
+                full_response = ""
+                logger.info("Starting real streaming from Ollama...")
+                start_time = datetime.now()
+                
+                token_count = 0
+                async for token in ai_service.stream_from_ollama_direct(full_prompt):
+                    token_count += 1
+                    current_time = datetime.now()
+                    time_elapsed = (current_time - start_time).total_seconds()
+                    
+                    logger.info(f"Token #{token_count} at {time_elapsed:.2f}s: '{token}'")
+                    full_response += token
+                    
+                    # Send token immediately as it arrives from Ollama
+                    yield {
+                        "event": "token",
+                        "data": json.dumps({"token": token})
+                    }
+                
+                logger.info(f"Streaming complete! Total tokens: {token_count}")
+                
+                # Store conversation in memory after completion
+                if request.user_id not in ai_service.user_conversations:
+                    ai_service.user_conversations[request.user_id] = []
+                
+                ai_service.user_conversations[request.user_id].append({
+                    "question": request.query,
+                    "answer": full_response.strip(),
+                    "timestamp": datetime.now().isoformat()
+                })
+                
+                # Keep only last 10 exchanges
+                if len(ai_service.user_conversations[request.user_id]) > 10:
+                    ai_service.user_conversations[request.user_id] = ai_service.user_conversations[request.user_id][-10:]
+                
+                # Send completion event
+                yield {
+                    "event": "complete",
+                    "data": json.dumps({
+                        "full_response": full_response.strip(),
+                        "data_summary": {
+                            "contacts_count": len(contacts),
+                            "notes_count": len(notes)
                         }
-                    elif chunk["type"] == "complete":
-                        yield {
-                            "event": "complete",
-                            "data": json.dumps({
-                                "full_response": chunk["full_response"],
-                                "data_summary": chunk["data_summary"]
-                            })
-                        }
+                    })
+                }
                         
             except Exception as e:
                 logger.error(f"AI streaming failed: {str(e)}")
@@ -158,7 +193,7 @@ async def query_ai_stream(request: AIQueryRequest):
                 "event": "error",
                 "data": json.dumps({"error": f"Unexpected error: {str(e)}"})
             }
-    
+
     return EventSourceResponse(generate_ai_stream())
 
 @router.get("/test-ollama")
@@ -228,3 +263,23 @@ async def get_user_data(user_id: str):
             status_code=500,
             detail=f"Error fetching user data: {str(e)}"
         )
+    
+@router.get("/test-streaming")
+async def test_streaming():
+    async def test_stream():
+        try:
+            prompt = "Say hello world"
+            async for chunk in ai_service.llm.astream(prompt):
+                logger.info(f"Test chunk: {chunk}")
+                yield {
+                    "event": "token",
+                    "data": json.dumps({"token": str(chunk)})
+                }
+        except Exception as e:
+            logger.error(f"Streaming test failed: {e}")
+            yield {
+                "event": "error", 
+                "data": json.dumps({"error": str(e)})
+            }
+    
+    return EventSourceResponse(test_stream())

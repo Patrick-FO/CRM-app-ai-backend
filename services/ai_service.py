@@ -8,6 +8,7 @@ from psycopg2.extras import RealDictCursor
 import json
 from datetime import datetime
 import asyncio
+import aiohttp
 
 class AIService:
     def __init__(self):
@@ -245,3 +246,28 @@ AI: """
             del self.user_conversations[user_id]
             return True
         return False
+    
+    async def stream_from_ollama_direct(self, prompt: str):
+        """Stream directly from Ollama HTTP API - bypasses LangChain"""
+        url = "http://localhost:11434/api/generate"
+        payload = {
+            "model": "llama3.2",
+            "prompt": prompt,
+            "stream": True,
+            "options": {
+                "temperature": 0.7
+            }
+        }
+        
+        async with aiohttp.ClientSession() as session:
+            async with session.post(url, json=payload) as response:
+                async for line in response.content:
+                    if line.strip():
+                        try:
+                            data = json.loads(line.decode('utf-8'))
+                            if 'response' in data and data['response']:
+                                yield data['response']
+                            if data.get('done', False):
+                                break
+                        except json.JSONDecodeError:
+                            continue
