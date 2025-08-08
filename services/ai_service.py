@@ -7,6 +7,7 @@ from config.database import get_db_connection
 from psycopg2.extras import RealDictCursor
 import json
 from datetime import datetime
+import asyncio
 
 class AIService:
     def __init__(self):
@@ -76,55 +77,51 @@ class AIService:
         finally:
             conn.close()
     
-    def ask_question(self, user_id: str, question: str):
-        """Ask AI a question about user's contacts and notes with simple conversation memory"""
-        try:
-            # Get user's data
-            contacts, notes = self.get_user_data(user_id)
-            
-            # Format contacts for AI (more readable)
-            contacts_formatted = []
-            for contact in contacts:
-                contact_info = f"• {contact['name']}"
-                if contact['company']:
-                    contact_info += f" ({contact['company']})"
-                if contact['contact_email']:
-                    contact_info += f" - {contact['contact_email']}"
-                if contact['phone_number']:
-                    contact_info += f" - {contact['phone_number']}"
-                contacts_formatted.append(contact_info)
-            
-            # Format notes for AI (more readable)
-            notes_formatted = []
-            for note in notes:
-                note_info = f"• {note['title']}"
-                if note['description']:
-                    note_info += f": {note['description']}"
-                if note['related_contacts']:
-                    note_info += f" (Related to: {', '.join(note['related_contacts'])})"
-                notes_formatted.append(note_info)
-            
-            # Create context about user's data
-            contacts_text = '\n'.join(contacts_formatted) if contacts_formatted else "No contacts found."
-            notes_text = '\n'.join(notes_formatted) if notes_formatted else "No notes found."
-            
-            # Get conversation history for this user (simple approach)
-            if user_id not in self.user_conversations:
-                self.user_conversations[user_id] = []
-            
-            conversation_history = self.user_conversations[user_id]
-            
-            # Format conversation history
-            history_text = ""
-            if conversation_history:
-                history_items = []
-                for item in conversation_history[-6:]:  # Last 6 exchanges (3 back-and-forth)
-                    history_items.append(f"Human: {item['question']}")
-                    history_items.append(f"AI: {item['answer']}")
-                history_text = "\n".join(history_items)
-            
-            # Create the full prompt
-            full_prompt = f"""You are a helpful AI assistant for a CRM system. You're having a conversation with a user about their business contacts and notes.
+    def build_prompt(self, user_id: str, question: str, contacts: list, notes: list):
+        """Build the full prompt with user data and conversation history"""
+        # Format contacts for AI (more readable)
+        contacts_formatted = []
+        for contact in contacts:
+            contact_info = f"• {contact['name']}"
+            if contact['company']:
+                contact_info += f" ({contact['company']})"
+            if contact['contact_email']:
+                contact_info += f" - {contact['contact_email']}"
+            if contact['phone_number']:
+                contact_info += f" - {contact['phone_number']}"
+            contacts_formatted.append(contact_info)
+        
+        # Format notes for AI (more readable)
+        notes_formatted = []
+        for note in notes:
+            note_info = f"• {note['title']}"
+            if note['description']:
+                note_info += f": {note['description']}"
+            if note['related_contacts']:
+                note_info += f" (Related to: {', '.join(note['related_contacts'])})"
+            notes_formatted.append(note_info)
+        
+        # Create context about user's data
+        contacts_text = '\n'.join(contacts_formatted) if contacts_formatted else "No contacts found."
+        notes_text = '\n'.join(notes_formatted) if notes_formatted else "No notes found."
+        
+        # Get conversation history for this user (simple approach)
+        if user_id not in self.user_conversations:
+            self.user_conversations[user_id] = []
+        
+        conversation_history = self.user_conversations[user_id]
+        
+        # Format conversation history
+        history_text = ""
+        if conversation_history:
+            history_items = []
+            for item in conversation_history[-6:]:  # Last 6 exchanges (3 back-and-forth)
+                history_items.append(f"Human: {item['question']}")
+                history_items.append(f"AI: {item['answer']}")
+            history_text = "\n".join(history_items)
+        
+        # Create the full prompt
+        full_prompt = f"""You are a helpful AI assistant for a CRM system. You're having a conversation with a user about their business contacts and notes.
 
 Context about the user's data:
 CONTACTS:
@@ -140,6 +137,17 @@ Also, you are not able to create notes or contacts for a user, so if they ask yo
 
 {f"Previous conversation:\n{history_text}\n" if history_text else ""}Human: {question}
 AI: """
+        
+        return full_prompt
+    
+    def ask_question(self, user_id: str, question: str):
+        """Ask AI a question about user's contacts and notes with simple conversation memory"""
+        try:
+            # Get user's data
+            contacts, notes = self.get_user_data(user_id)
+            
+            # Build the full prompt
+            full_prompt = self.build_prompt(user_id, question, contacts, notes)
             
             # Get AI response
             response = self.llm.invoke(full_prompt)
@@ -167,6 +175,59 @@ AI: """
         except Exception as e:
             return {
                 "success": False,
+                "error": str(e)
+            }
+    
+    async def ask_question_stream(self, user_id: str, question: str):
+        """Stream AI response as it's generated (async generator)"""
+        try:
+            # Get user's data
+            contacts, notes = self.get_user_data(user_id)
+            
+            # Build the full prompt (reuse the same logic)
+            full_prompt = self.build_prompt(user_id, question, contacts, notes)
+            
+            # Get AI response (for now, we simulate streaming by chunking)
+            # Note: Real streaming would require Ollama's streaming API
+            response = self.llm.invoke(full_prompt)
+            
+            # Simulate streaming by sending word chunks
+            full_response = ""
+            words = response.split()
+            
+            for i, word in enumerate(words):
+                full_response += word + " "
+                yield {
+                    "type": "token",
+                    "content": word + " "
+                }
+                # Small delay to simulate real streaming
+                await asyncio.sleep(0.05)
+            
+            # Store this exchange in conversation history
+            self.user_conversations[user_id].append({
+                "question": question,
+                "answer": response.strip(),
+                "timestamp": datetime.now().isoformat()
+            })
+            
+            # Keep only last 10 exchanges
+            if len(self.user_conversations[user_id]) > 10:
+                self.user_conversations[user_id] = self.user_conversations[user_id][-10:]
+            
+            # Send completion signal
+            yield {
+                "type": "complete",
+                "full_response": full_response.strip(),
+                "data_summary": {
+                    "contacts_count": len(contacts),
+                    "notes_count": len(notes)
+                }
+            }
+            
+        except Exception as e:
+            yield {
+                "type": "error",
                 "error": str(e)
             }
     

@@ -3,7 +3,7 @@ from typing import List, Optional
 import uuid
 
 class AIQueryRequest(BaseModel):
-    user_id: str  # UUID as string
+    user_id: str
     query: str
 
 class AIQueryResponse(BaseModel):
@@ -24,4 +24,4 @@ class Note(BaseModel):
     title: str
     description: Optional[str] = None
     contact_ids: List[int]
-    related_contacts: List[str]  # Contact names for display
+    related_contacts: List[str]
